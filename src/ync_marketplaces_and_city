@@ -1,0 +1,133 @@
+import os
+import time
+import re
+import requests
+import pandas as pd
+
+API_TOKEN = os.getenv("PIPEDRIVE_API_TOKEN")
+BASE_URL = "https://api.pipedrive.com/v1"
+
+if not API_TOKEN:
+    raise RuntimeError("PIPEDRIVE_API_TOKEN environment variable is not set.")
+
+# Placeholder field keys — replace with your actual custom field IDs
+FIELD_MARKETPLACES = "CUSTOM_FIELD_MARKETPLACES"
+FIELD_CITY = "CUSTOM_FIELD_CITY"
+
+ALLOWED_MARKETPLACES = {
+    "bistro sk": "Bistro SK",
+    "bolt food": "Bolt Food",
+    "bond": "Bond",
+    "foodora": "Foodora",
+    "glovo": "Glovo",
+    "loko": "Loko",
+    "none": "None",
+    "other": "Other",
+    "pyszne": "Pyszne",
+    "pyszne.pl": "Pyszne",
+    "uber": "Uber Eats",
+    "uber eats": "Uber Eats",
+    "wolt": "Wolt"
+}
+
+
+def extract_deal_id(url: str):
+    match = re.search(r"deal/(\d+)", str(url))
+    return match.group(1) if match else None
+
+
+def update_organization_marketplaces(org_id: int, marketplaces: list):
+    payload = {FIELD_MARKETPLACES: marketplaces}
+    resp = requests.put(
+        f"{BASE_URL}/organizations/{org_id}",
+        params={"api_token": API_TOKEN},
+        json=payload,
+        timeout=30,
+    )
+    return resp
+
+
+def update_deal_city(deal_id: int, city: str):
+    payload = {FIELD_CITY: city}
+    resp = requests.put(
+        f"{BASE_URL}/deals/{deal_id}",
+        params={"api_token": API_TOKEN},
+        json=payload,
+        timeout=30,
+    )
+    return resp
+
+
+def main():
+    df = pd.read_excel("market.xlsx")
+    df["deal_id"] = df["LINK"].str.extract(r"deal/(\d+)", expand=False)
+
+    for _, row in df.iterrows():
+        deal_id = extract_deal_id(row.get("LINK", ""))
+        if not deal_id:
+            print("Skipping row: deal_id not found.")
+            continue
+
+        # ---- Parse marketplaces ----
+        raw = row.get("Market", "")
+        valid_marketplaces = []
+        invalid = []
+
+        if pd.notna(raw):
+            for mp in str(raw).split(","):
+                key = mp.strip().lower()
+                if key in ALLOWED_MARKETPLACES:
+                    valid_marketplaces.append(ALLOWED_MARKETPLACES[key])
+                elif key:
+                    invalid.append(mp.strip())
+
+        if invalid:
+            print(f"⚠ Unknown marketplace labels for deal {deal_id}: {invalid}")
+
+        # ---- Parse city ----
+        city = str(row.get("City", "")).strip()
+        if city == "":
+            city = None
+
+        # ---- Get organization ID ----
+        deal_resp = requests.get(
+            f"{BASE_URL}/deals/{deal_id}",
+            params={"api_token": API_TOKEN},
+            timeout=30,
+        )
+
+        deal_data = deal_resp.json().get("data")
+        if not deal_data or not deal_data.get("org_id"):
+            print(f"❌ deal {deal_id}: organization not found")
+            continue
+
+        org_id_raw = deal_data["org_id"]
+        org_id = org_id_raw["value"] if isinstance(org_id_raw, dict) else org_id_raw
+
+        # ---- Update organization marketplaces ----
+        if valid_marketplaces:
+            print(f"Updating org {org_id} marketplaces → {valid_marketplaces}")
+            resp = update_organization_marketplaces(org_id, valid_marketplaces)
+            if resp.status_code == 200:
+                print(f"✅ Org {org_id} updated.")
+            else:
+                print(f"❌ Org update error: {resp.text}")
+        else:
+            print(f"No valid marketplaces for deal {deal_id}")
+
+        # ---- Update deal city ----
+        if city:
+            print(f"Updating deal {deal_id} city → {city}")
+            resp = update_deal_city(deal_id, city)
+            if resp.status_code == 200:
+                print(f"✅ Deal {deal_id} updated.")
+            else:
+                print(f"❌ City update error for deal {deal_id}: {resp.text}")
+        else:
+            print(f"No city provided for deal {deal_id}")
+
+        time.sleep(0.3)
+
+
+if __name__ == "__main__":
+    main()
